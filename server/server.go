@@ -11,6 +11,7 @@ import (
 )
 
 var gDB *DB
+var gPersona PersonaHandler
 
 func serveSingle(pattern string, filename string) {
 	http.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
@@ -20,7 +21,7 @@ func serveSingle(pattern string, filename string) {
 }
 
 func ensureIsLoggedIn(request *restful.Request, response *restful.Response, chain *restful.FilterChain) {
-	if !IsLoggedIn(request.Request) {
+	if !gPersona.IsLoggedIn(request.Request) {
 		response.WriteError(http.StatusUnauthorized, nil)
 		return
 	}
@@ -36,7 +37,7 @@ func getDeviceForRequest(request *restful.Request, response *restful.Response) *
 	}
 
 	device, err := gDB.GetDeviceById(id)
-	if device != nil && device.User == GetLoginName(request.Request) {
+	if device != nil && device.User == gPersona.GetLoginName(request.Request) {
 		return device
 	}
 
@@ -56,7 +57,7 @@ func addDevice(request *restful.Request, response *restful.Response) {
 		return
 	}
 
-	device, err := gDB.AddDevice(GetLoginName(request.Request), name, endpoint)
+	device, err := gDB.AddDevice(gPersona.GetLoginName(request.Request), name, endpoint)
 	if err == nil {
 		response.WriteEntity(*device)
 	} else {
@@ -65,7 +66,7 @@ func addDevice(request *restful.Request, response *restful.Response) {
 }
 
 func serveDevicesByUser(request *restful.Request, response *restful.Response) {
-	devices, _ := gDB.ListDevicesForUser(GetLoginName(request.Request))
+	devices, _ := gDB.ListDevicesForUser(gPersona.GetLoginName(request.Request))
 
 	urls := []string{}
 	for _, d := range devices {
@@ -169,6 +170,19 @@ func createDeviceWebService() *restful.WebService {
 	return ws
 }
 
+// Persona's verifier URL is different for Firefox OS and Firefox Desktop
+func makePersonaLoginHandler(verifierURL string) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		err := gPersona.Login(verifierURL, w, r)
+		if err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(err.Error()))
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+	}
+}
+
 func main() {
 	readConfig()
 	db, err := OpenDB("db.sqlite")
@@ -179,11 +193,12 @@ func main() {
 	gDB = db
 	restful.Add(createDeviceWebService())
 
+	gPersona = NewPersonaHandler(gServerConfig.PersonaName, gServerConfig.SessionCookie)
+
 	// Persona handling
-	http.HandleFunc("/auth/check", loginCheckHandler)
-	http.HandleFunc("/auth/login", loginHandler)
-	http.HandleFunc("/auth/applogin", appLoginHandler)
-	http.HandleFunc("/auth/logout", logoutHandler)
+	http.HandleFunc("/auth/login", makePersonaLoginHandler("https://verifier.login.persona.org/verify"))
+	http.HandleFunc("/auth/applogin", makePersonaLoginHandler("https://firefoxos.persona.org/verify"))
+	http.HandleFunc("/auth/logout", gPersona.Logout)
 
 	serveSingle("/", "./static/index.html")
 	serveSingle("/index.html", "./static/index.html")
